@@ -78,8 +78,50 @@ def _face_recogniser(pack: str = "buffalo_l"):
         name=pack, root=root, allowed_modules=["detection", "recognition"],
         providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
     app.prepare(ctx_id=0, det_size=(640, 640))
+    _warn_if_insightface_on_cpu(app)
     _REC_CACHE[pack] = app
     return app
+
+
+def _warn_if_insightface_on_cpu(app) -> None:
+    """Say so when InsightFace has silently landed on CPU instead of CUDA.
+
+    The providers list handed to FaceAnalysis is a preference, not a guarantee:
+    onnxruntime quietly falls through to the next entry rather than raising. The
+    usual cause is the one the README already calls out - onnxruntime and
+    onnxruntime-gpu both installed, where the CPU-only package wins and the CUDA
+    provider is simply not in the build. identity_track keeps working and keeps
+    giving the right answer; it just runs many times slower, with nothing
+    anywhere saying why.
+
+    Both models are checked, not just detection: recognition is the one that
+    runs per candidate face and dominates the cost of identity tracking.
+
+    Best-effort. Failing to introspect onnxruntime is not worth breaking a run
+    over, so every step here is inside the guard.
+    """
+    try:
+        on_cpu = [name for name, model in getattr(app, "models", {}).items()
+                  if getattr(model, "session", None) is not None
+                  and "CUDAExecutionProvider" not in model.session.get_providers()]
+        if not on_cpu:
+            return
+        try:
+            import onnxruntime
+
+            available = onnxruntime.get_available_providers()
+        except Exception:
+            available = ["<onnxruntime could not be imported>"]
+        print(f"[H3FaceRefine] WARNING: InsightFace is running its "
+              f"{' and '.join(sorted(on_cpu))} "
+              f"{'models' if len(on_cpu) > 1 else 'model'} on CPU, not CUDA, so "
+              f"identity_track and identity_reference will be far slower than they "
+              f"should be. onnxruntime reports {available} as available. If "
+              f"CUDAExecutionProvider is missing from that list, onnxruntime and "
+              f"onnxruntime-gpu are most likely both installed and the CPU-only one "
+              f"is winning - see the onnxruntime note in the README.")
+    except Exception:
+        pass
 
 
 def _embed_faces(app, bgr: np.ndarray) -> list:
